@@ -11,156 +11,156 @@ void Mediator::shutdown() { shutdown_flag_ = true; }
 
 /**< TODO: Implement the spin_once method */
 void Mediator::spin_once() {
-    if (shutdown_flag_ || !server_ || !server_->ok()) {
-        return;
-    }
+    if (shutdown_flag_.load() || !server_ || !server_->ok()) return;
 
-    if (!server_->wait_for_accept(rix::util::Duration(0.0))) {
-        return;
-    }
+    // Wait for an incoming connection from a node/publisher/subscriber
+    if (!server_->wait_for_accept(rix::util::Duration(0.0))) return;
 
     std::weak_ptr<rix::ipc::interfaces::Connection> wconn;
-    if (!server_->accept(wconn)){
-        return;
-    }
-
+    if (!server_->accept(wconn)) return;
     auto conn = wconn.lock();
-    if (!conn) {
-        return;
-    }
+    if (!conn) return;
 
+    // Read operation header
     rix::msg::mediator::Operation op;
     std::vector<uint8_t> hdr(op.size());
-    ssize_t rd = conn->read(hdr.data(), hdr.size());
-    if (rd != static_cast<ssize_t>(hdr.size())) {
-        return;
-    }
+    ssize_t hbytes = conn->read(hdr.data(), hdr.size());
+    size_t hoff = 0;
 
-    size_t offset = 0;
-    if (!op.deserialize(hdr.data(), hdr.size(), offset)) {
+    if (hbytes != static_cast<ssize_t>(hdr.size()) || !op.deserialize(hdr.data(), hbytes, hoff)) {
+        rix::msg::mediator::Status status;
+        status.error = 1;
+        send_status_message(conn, status);
         return;
     }
 
     std::vector<uint8_t> payload(op.len);
-    ssize_t rd2 = conn->read(payload.data(), payload.size());
-    if (rd2 != static_cast<ssize_t>(payload.size())) {
+    ssize_t pbytes = conn->read(payload.data(), payload.size());
+    if (pbytes != static_cast<ssize_t>(payload.size())) {
+        rix::msg::mediator::Status status;
+        status.error = 1;
+        send_status_message(conn, status);
         return;
     }
+    size_t poff = 0;
 
-    switch (static_cast<OPCODE>(op.opcode)) {
+    switch (op.opcode) {
         case OPCODE::NODE_REGISTER: {
-            rix::msg::mediator::NodeInfo node;
-            size_t poff = 0;
-            if (!node.deserialize(payload.data(), payload.size(), poff)) {
+            rix::msg::mediator::NodeInfo info;
+            if (!info.deserialize(payload.data(), payload.size(), poff)) {
+                rix::msg::mediator::Status status;
+                status.error = 1;
+                send_status_message(conn, status);
                 return;
             }
-            {
-                std::lock_guard<std::mutex> lock(mutex);
-                nodes_[node.id] = node;
-            }
-
+            nodes_[info.id] = info;
+            rix::util::Log::info << "[rixhub] Registered node \"" << info.name << "\"." << std::endl;
             rix::msg::mediator::Status status;
             status.error = 0;
-            std::vector<uint8_t> buf(status.size());
-            size_t off = 0;
-            status.serialize(buf.data(), off);
-            conn->write(buf.data(), buf.size());
+            send_status_message(conn, status);
             break;
         }
 
         case OPCODE::NODE_DEREGISTER: {
-            rix::msg::mediator::NodeInfo node;
-            size_t poff = 0;
-            if (!node.deserialize(payload.data(), payload.size(), poff)) {
-                return;
-            }
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                nodes_.erase(node.id);
+            rix::msg::mediator::NodeInfo info;
+            if (info.deserialize(payload.data(), payload.size(), poff)) {
+                nodes_.erase(info.id);
+                rix::util::Log::info << "[rixhub] Deregistered node \"" << info.name << "\"." << std::endl;
             }
             break;
         }
 
         case OPCODE::PUB_REGISTER: {
-            rix::msg::mediator::PubInfo pub;
-            size_t poff = 0;
-            if (!pub.deserialize(payload.data(), payload.size(), poff)) {
+            rix::msg::mediator::PubInfo info;
+            if (!info.deserialize(payload.data(), payload.size(), poff)) {
+                rix::msg::mediator::Status status;
+                status.error = 1;
+                send_status_message(conn, status);
                 return;
             }
-            bool valid = validate_topic_info(pub.topic_info);
-            if (valid) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                publishers_[pub.topic_info.id].push_back(pub);
+            if (!validate_topic_info(info.topic_info)) {
+                rix::util::Log::warn << "[rixhub] Reject publisher (topic hash mismatch): " << info.topic_info.name << std::endl;
+                rix::msg::mediator::Status status;
+                status.error = 1;
+                send_status_message(conn, status);
+                return;
             }
+
+            publishers_[info.id] = info;
+            rix::util::Log::info << "[rixhub] Registered publisher on \"" << info.topic_info.name << "\"." << std::endl;
             rix::msg::mediator::Status status;
-            status.error = valid ? 0 : 1;
-            std::vector<uint8_t> buf(status.size());
-            size_t off = 0;
-            status.serialize(buf.data(), off);
-            conn->write(buf.data(), buf.size());
-            if (valid) {
-                notify_subscribers(pub.topic_info.id);
+            status.error = 0;
+            send_status_message(conn, status);
+
+            // Notify all subscribers of this topic
+            std::vector<rix::msg::mediator::SubInfo> subs;
+            for (const auto &kv : subscribers_) {
+                if (kv.second.topic_info.name == info.topic_info.name)
+                    subs.push_back(kv.second);
             }
+            if (!subs.empty())
+                notify_subscribers(subs, info);
             break;
         }
 
         case OPCODE::PUB_DEREGISTER: {
-            rix::msg::mediator::PubInfo pub;
-            size_t poff = 0;
-            if (!pub.deserialize(payload.data(), payload.size(), poff)) return;
-
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                auto it = publishers_.find(pub.topic_info.id);
-                if (it != publishers_.end()) {
-                    auto &vec = it->second;
-                    vec.erase(std::remove_if(vec.begin(), vec.end(),
-                                             [&](const auto &p) { return p.id == pub.id; }),
-                              vec.end());
-                }
+            rix::msg::mediator::PubInfo info;
+            if (info.deserialize(payload.data(), payload.size(), poff)) {
+                publishers_.erase(info.id);
+                rix::util::Log::info << "[rixhub] Deregistered publisher on \""
+                                     << info.topic_info.name << "\"." << std::endl;
             }
             break;
         }
 
         case OPCODE::SUB_REGISTER: {
-            rix::msg::mediator::SubInfo sub;
-            size_t poff = 0;
-            if (!sub.deserialize(payload.data(), payload.size(), poff)) return;
-            bool valid = validate_topic_info(sub.topic_info);
-            if (valid) {
-                std::lock_guard<std::mutex> lock(mutex_);
-                subscribers_[sub.topic_info.id].push_back(sub);
+            rix::msg::mediator::SubInfo info;
+            if (!info.deserialize(payload.data(), payload.size(), poff)) {
+                rix::msg::mediator::Status status;
+                status.error = 1;
+                send_status_message(conn, status);
+                return;
             }
+            if (!validate_topic_info(info.topic_info)) {
+                rix::util::Log::warn << "[rixhub] Reject subscriber (topic hash mismatch): " << info.topic_info.name << std::endl;
+                rix::msg::mediator::Status status;
+                status.error = 1;
+                send_status_message(conn, status);
+                return;
+            }
+
+            subscribers_[info.id] = info;
+            rix::util::Log::info << "[rixhub] Registered subscriber on \"" << info.topic_info.name << "\"." << std::endl;
             rix::msg::mediator::Status status;
-            status.error = valid ? 0 : 1;
-            std::vector<uint8_t> buf(status.size());
-            size_t off = 0;
-            status.serialize(buf.data(), off);
-            conn->write(buf.data(), buf.size());
-            if (valid) {
-                notify_subscribers(sub.topic_info.id, sub.endpoint);
+            status.error = 0;
+            send_status_message(conn, status);
+
+            // Notify this subscriber of all current publishers on the same topic
+            std::vector<rix::msg::mediator::PubInfo> pubs;
+            for (const auto &kv : publishers_) {
+                if (kv.second.topic_info.name == info.topic_info.name)
+                    pubs.push_back(kv.second);
             }
+            if (!pubs.empty())
+                notify_subscribers(info, pubs);
             break;
         }
 
         case OPCODE::SUB_DEREGISTER: {
-            rix::msg::mediator::SubInfo sub;
-            size_t poff = 0;
-            if (!sub.deserialize(payload.data(), payload.size(), poff)) return;
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                auto it = subscribers_.find(sub.topic_info.id);
-                if (it != subscribers_.end()) {
-                    auto &vec = it->second;
-                    vec.erase(std::remove_if(vec.begin(), vec.end(),
-                                             [&](const auto &s) { return s.id == sub.id; }),
-                              vec.end());
-                }
+            rix::msg::mediator::SubInfo info;
+            if (info.deserialize(payload.data(), payload.size(), poff)) {
+                subscribers_.erase(info.id);
+                rix::util::Log::info << "[rixhub] Deregistered subscriber on \""
+                                     << info.topic_info.name << "\"." << std::endl;
             }
             break;
         }
+
         default: {
-            rix::util::Log::warn << "Mediator: Unknown opcode " << op.opcode << std::endl;
+            rix::util::Log::warn << "[rixhub] Unknown opcode received: " << op.opcode << std::endl;
+            rix::msg::mediator::Status status;
+            status.error = 1;
+            send_status_message(conn, status);
             break;
         }
     }
@@ -169,19 +169,63 @@ void Mediator::spin_once() {
 /**< TODO: Implement the notify_subscribers method. */
 void Mediator::notify_subscribers(const std::vector<rix::msg::mediator::SubInfo> &subscribers,
                                   const rix::msg::mediator::PubInfo &publisher) {
-    return;
+    if (subscribers.empty()) {
+        return;
+    }
+
+    rix::msg::mediator::SubNotify notify;
+    notify.publishers.clear();
+    notify.publishers.push_back(publisher);
+
+    for (const auto &sub : subscribers) {
+        auto client = client_factory_ ? client_factory_() : nullptr;
+        if (!client) {
+            continue;
+        }
+
+        rix::ipc::Endpoint ep(sub.endpoint.address, sub.endpoint.port);
+
+        (void)send_message_with_opcode_no_response(client, notify, OPCODE::SUB_NOTIFY, ep);
+    }
 }
 
 /**< TODO: Implement the notify_subscribers method. */
-void Mediator::notify_subscribers(const rix::msg::mediator::SubInfo &subscriber,
-                                  const std::vector<rix::msg::mediator::PubInfo> &publishers) {
-    return;
+void Mediator::notify_subscribers(const rix::msg::mediator::SubInfo &sub,
+                                  const std::vector<rix::msg::mediator::PubInfo> &pubs) {
+    if (pubs.empty()) {
+        return;
+    }
+
+    rix::msg::mediator::SubNotify notify;
+    notify.publishers = pubs;
+
+    auto client = client_factory_ ? client_factory_() : nullptr;
+    if (!client) {
+        return;
+    }
+
+    /**for (const auto &pub : publishers) {
+        auto client = client_factory_ ? client_factory_() : nullptr;
+        if (!client) {
+            continue;
+        }
+
+        rix::ipc::Endpoint ep(pub.endpoint.address, pub.endpoint.port);
+
+        (void)send_message_with_opcode_no_response(client, notify, OPCODE::SUB_NOTIFY, ep);
+    }**/
+    rix::ipc::Endpoint ep(sub.endpoint.address, sub.endpoint.port);
+    (void)send_message_with_opcode_no_response(client, notify, OPCODE::SUB_NOTIFY, ep);
 }
 
 /**< TODO: Implement the validate_topic_info method. */
 bool Mediator::validate_topic_info(const rix::msg::mediator::TopicInfo &info) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = topics_.find(topic.id);
+    auto it = topic_hashes_.find(info.name);
+    if (it == topic_hashes_.end()) {
+        topic_hashes_[info.name] = info.message_hash;
+        return true;
+    }
+    return it->second == info.message_hash;
 }
 
 void Mediator::send_status_message(std::shared_ptr<rix::ipc::interfaces::Connection> conn,
