@@ -4,10 +4,12 @@ set(CMAKE_CXX_STANDARD 20)
 project(pub-sub)
 
 # Used to find GTest on CAEN
-list(APPEND CMAKE_PREFIX_PATH "~/.local")
+# list(APPEND CMAKE_PREFIX_PATH "~/.local")
+list(APPEND CMAKE_PREFIX_PATH "/usr/include")
 
 find_package(GTest REQUIRED)
 find_package(Threads REQUIRED)
+find_package(GMock REQUIRED)
 
 # Used to compile on Autograder (possibly unnecessary ...)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -69,3 +71,6 @@ target_include_directories(simple_subscriber PRIVATE include/)
 add_executable(rix_test tests/rix_test.cpp)
 target_link_libraries(rix_test PRIVATE project3 GTest::gtest_main GTest::gmock)
 target_include_directories(rix_test PRIVATE include/)
+
+
+
