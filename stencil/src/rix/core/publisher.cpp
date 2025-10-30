@@ -14,11 +14,23 @@ Publisher::Publisher(const rix::msg::mediator::PubInfo &info, std::shared_ptr<ri
     }
 
     /**< TODO: Register the publisher with the mediator */
+    auto client = factory_();
+    if (!client) {
+        rix::util::Log::warn << "Publisher: failed to create client for registration." << std::endl;
+        return;
+    }
+    if (!send_message_with_opcode(client, info_, OPCODE::PUB_REGISTER, rixhub_endpoint_)) {
+        rix::util::Log::warn << "Publisher: PUB_REGISTER failed." << std::endl;
+    }
 }
 
 Publisher::~Publisher() {
-    shutdown();
+    //shutdown();
     /**< TODO: Deregister the publisher with the mediator */
+    auto client = factory_();
+    if (client) {
+        (void)send_message_with_opcode_no_response(client, info_, OPCODE::PUB_DEREGISTER, rixhub_endpoint_);
+    }
 }
 
 bool Publisher::ok() const { return !shutdown_flag_; }

@@ -14,10 +14,10 @@ Subscriber::Subscriber(const rix::msg::mediator::SubInfo &info, std::shared_ptr<
 
     /**< TODO: Register the subscriber with the mediator */
     auto client = factory_();
-    /**if (client && client->connect(rixhub_endpoint_)) {
+    if (client && client->connect(rixhub_endpoint_)) {
         rix::msg::mediator::Operation op;
-        op.opcode = rix::core::SUB_REGISTER;
-        op.len = info_.size();
+        op.opcode = static_cast<uint16_t>(OPCODE::SUB_REGISTER);
+        op.len = static_cast<uint32_t>(info_.size());
 
         std::vector<uint8_t> buf(op.size() + info_.size());
         size_t offset = 0;
@@ -39,13 +39,6 @@ Subscriber::Subscriber(const rix::msg::mediator::SubInfo &info, std::shared_ptr<
     }
     else {
         rix::util::Log::warn << "Subscriber failed to connect to rixhub for registration." << std::endl;
-    }**/
-    if (!client) {
-        rix::util::Log::warn << "Subscriber: failed to create client for registration." << std::endl;
-        return;
-    }
-    if (!send_message_with_opcode(client, info_, OPCODE::SUB_REGISTER, rixhub_endpoint_)) {
-        rix::util::Log::warn << "Subscriber: SUB_REGISTER failed." << std::endl;
     }
 }
 
@@ -54,19 +47,16 @@ Subscriber::~Subscriber() {
 
     /**< TODO: Deregister the subscriber with the mediator */
     auto client = factory_();
-    /**if (client && client->connect(rixhub_endpoint_)) {
+    if (client && client->connect(rixhub_endpoint_)) {
         rix::msg::mediator::Operation op;
-        op.opcode = rix::core::SUB_DEREGISTER;
-        op.len = info_.size();
+        op.opcode = static_cast<uint16_t>(OPCODE::SUB_DEREGISTER);
+        op.len = static_cast<uint32_t>(info_.size());
 
         std::vector<uint8_t> buf(op.size() + info_.size());
         size_t offset = 0;
         op.serialize(buf.data(), offset);
         info_.serialize(buf.data(), offset);
         (void)client->write(buf.data(), buf.size());
-    }**/
-    if (client) {
-        (void)send_message_with_opcode_no_response(client, info_, OPCODE::SUB_DEREGISTER, rixhub_endpoint_);
     }
 }
 
@@ -84,48 +74,95 @@ size_t Subscriber::get_publisher_count() const {
 /**< TODO: Implement the spin_once method */
 void Subscriber::spin_once() {
     if (shutdown_flag_) return;
-    {
-        if (server_->wait_for_accept(rix::util::Duration(0.0))) {
-            std::weak_ptr<rix::ipc::interfaces::Connection> wconn;
-            if (server_->accept(wconn)) {
-                auto conn = wconn.lock();
-                if (conn) {
-                    rix::msg::mediator::Operation op;
-                    std::vector<uint8_t> hdr(op.size());
-                    ssize_t rd = conn->read(hdr.data(), hdr.size());
-                    if (rd == (ssize_t)hdr.size()) {
-                        size_t offset = 0;
-                        if (op.deserialize(hdr.data(), hdr.size(), offset)) {
-                            if (op.opcode == rix::core::SUB_NOTIFY) {
-                                std::vector<uint8_t> payload(op.len);
-                                ssize_t rd2 = conn->read(payload.data(), payload.size());
-                                if (rd2 == (ssize_t)payload.size()) {
-                                    rix::msg::mediator::SubNotify notify;
-                                    size_t poff = 0;
-                                    if (notify.deserialize(payload.data(), payload.size(), poff)) {
-                                        for (const auto &pub : notify.publishers) {
-                                            auto cli = factory_();
-                                            if (!cli) {
-                                                continue;
-                                            }
-                                            cli->set_nonblocking(true);
-                                            rix::ipc::Endpoint ep(pub.endpoint.address, pub.endpoint.port);
-                                            if (cli->connect(ep)) {
-                                                std::lock_guard<std::mutex> guard(callback_mutex_);
-                                                clients_[pub.id] = cli;
-                                            }
+    /**for (;;) {
+        std::weak_ptr<rix::ipc::interfaces::Connection> wconn;
+        if (!server_->accept(wconn)) {
+            break;
+        }
+        if (server_->accept(wconn)) {
+            auto conn = wconn.lock();
+            if (conn) {
+                rix::msg::mediator::Operation op;
+                std::vector<uint8_t> hdr(op.size());
+                ssize_t rd = conn->read(hdr.data(), hdr.size());
+                if (rd == static_cast<ssize_t>(hdr.size())) {
+                    size_t offset = 0;
+                    if (op.deserialize(hdr.data(), hdr.size(), offset)) {
+                        if (op.deserialize(hdr.data(), hdr.size(), offset) &&
+                        op.opcode == static_cast<uint16_t>(OPCODE::SUB_NOTIFY) &&
+                        op.len > 0) {
+                            std::vector<uint8_t> payload(op.len);
+                            ssize_t rd2 = conn->read(payload.data(), payload.size());
+                            if (rd2 == (ssize_t)payload.size()) {
+                                rix::msg::mediator::SubNotify notify;
+                                size_t poff = 0;
+                                if (notify.deserialize(payload.data(), payload.size(), poff)) {
+                                    for (const auto &pub : notify.publishers) {
+                                        auto cli = factory_();
+                                        if (!cli) {
+                                            continue;
+                                        }
+                                        cli->set_nonblocking(true);
+                                        rix::ipc::Endpoint ep(pub.endpoint.address, pub.endpoint.port);
+                                        if (cli->connect(ep)) {
+                                            std::lock_guard<std::mutex> guard(callback_mutex_);
+                                            clients_[pub.id] = cli;
                                         }
                                     }
-                                    else {
-                                        rix::util::Log::warn << "Subscriber failed to deserialize SubNotify." << std::endl;
-                                    }
                                 }
-                            }
-                            else {
-                                rix::util::Log::warn << "Subscriber received unexpected opcode from mediator." << std::endl;
+                                else {
+                                    rix::util::Log::warn << "Subscriber failed to deserialize SubNotify." << std::endl;
+                                }
                             }
                         }
                     }
+                }
+            }
+        }
+    }**/
+    for (;;) {
+        std::weak_ptr<rix::ipc::interfaces::Connection> wconn;
+        if (!server_->accept(wconn)) {
+            break;
+        }
+        if (auto conn = wconn.lock()) {
+            rix::msg::mediator::Operation op;
+            std::vector<uint8_t> hdr(op.size());
+            ssize_t rd = conn->read(hdr.data(), hdr.size());
+            if (rd != static_cast<ssize_t>(hdr.size())) {
+                continue;
+            }
+
+            size_t off = 0;
+            if (!op.deserialize(hdr.data(), hdr.size(), off)) {
+                continue;
+            }
+            if (op.opcode != static_cast<uint16_t>(OPCODE::SUB_NOTIFY) || op.len == 0) {
+                continue;
+            }
+
+            std::vector<uint8_t> payload(op.len);
+            ssize_t rd2 = conn->read(payload.data(), payload.size());
+            if (rd2 != static_cast<ssize_t>(payload.size())) {
+                continue;
+            }
+
+            rix::msg::mediator::SubNotify notify;
+            size_t poff = 0;
+            if (!notify.deserialize(payload.data(), payload.size(), poff)) {
+                continue;
+            }
+
+            for (const auto &pub : notify.publishers) {
+                auto cli = factory_();
+                if (!cli) {
+                    continue;
+                }
+                cli->set_nonblocking(true);
+                rix::ipc::Endpoint ep(pub.endpoint.address, pub.endpoint.port);
+                if (cli->connect(ep)) {
+                    std::lock_guard<std::mutex> guard(callback_mutex_);
+                    clients_[pub.id] = cli;
                 }
             }
         }
@@ -134,6 +171,7 @@ void Subscriber::spin_once() {
     std::vector<std::shared_ptr<rix::ipc::interfaces::Client>> local_clients;
     {
         std::lock_guard<std::mutex> guard(callback_mutex_);
+        local_clients.reserve(clients_.size());
         /**for (auto it = clients_.begin(); it != clients_.end();) {
             if (auto sp = it->lock()) {
                 local_clients.push_back(sp);
@@ -149,22 +187,23 @@ void Subscriber::spin_once() {
     }
 
     for (auto &cli : local_clients) {
+        if (!cli) {
+            continue;
+        }
         rix::msg::standard::UInt32 sz;
         std::vector<uint8_t> lenbuf(sz.size());
         ssize_t rd = cli->read(lenbuf.data(), lenbuf.size());
-        if (rd != (ssize_t)lenbuf.size()) {
+        if (rd != static_cast<ssize_t>(lenbuf.size())) {
             continue;
         }
         size_t off = 0;
-        if (!sz.deserialize(lenbuf.data(), lenbuf.size(), off)) {
+        if (!sz.deserialize(lenbuf.data(), lenbuf.size(), off) || sz.data == 0) {
             continue;
         }
-        if (sz.data == 0) {
-            continue;
-        }
+
         std::vector<uint8_t> payload(sz.data);
         ssize_t rd2 = cli->read(payload.data(), payload.size());
-        if (rd2 != (ssize_t)payload.size()) {
+        if (rd2 != static_cast<ssize_t>(payload.size())) {
             continue;
         }
 

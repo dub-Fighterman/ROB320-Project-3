@@ -7,6 +7,10 @@ Node::~Node() {
     shutdown();
     
     /**< TODO: Register the node with the mediator */
+    if (client_factory_) {
+        auto client = client_factory_();
+        (void)rix::core::send_message_with_opcode(client, info_, OPCODE::NODE_REGISTER, rixhub_endpoint_);
+    }
 }
 
 bool Node::ok() const { return !shutdown_flag_; }
@@ -43,13 +47,67 @@ uint64_t Node::generate_id() {
 /**< TODO: Implement the create_publisher method */
 std::shared_ptr<Publisher> Node::create_publisher(const rix::msg::mediator::TopicInfo &topic_info,
                                                   const rix::ipc::Endpoint &endpoint) {
-    return nullptr;
+    auto server = server_factory_ ? server_factory_(endpoint) : nullptr;
+    if (!server || !server->ok()) {
+        rix::util::Log::error << "Failed to create publisher server on " << endpoint.to_string() << std::endl;
+        return nullptr;
+    }
+
+    rix::msg::mediator::PubInfo info;
+    info.id = generate_id();
+    info.topic_info = topic_info;
+
+    {
+        rix::msg::mediator::Endpoint ep_msg;
+        ep_msg.address = endpoint.address;
+        ep_msg.port    = endpoint.port;
+        info.endpoint  = ep_msg;
+    }
+    
+    std::shared_ptr<rix::core::Publisher> pub(new rix::core::Publisher(info, server, client_factory_, rixhub_endpoint_));
+    if (!pub) {
+        return nullptr;
+    }
+
+    {
+        //std::lock_guard<std::mutex> guard(components_mutex_);
+        components_.push_back(std::static_pointer_cast<rix::core::interfaces::Spinner>(pub));
+    }
+
+    return pub;
 }
 
 /**< TODO: Implement the create_subscriber method */
 std::shared_ptr<Subscriber> Node::create_subscriber(const rix::msg::mediator::TopicInfo &topic_info,
                                                     const rix::ipc::Endpoint &endpoint) {
-    return nullptr;
+    auto server = server_factory_ ? server_factory_(endpoint) : nullptr;
+    if (!server || !server->ok()) {
+        rix::util::Log::error << "Failed to create subscriber server on " << endpoint.to_string() << std::endl;
+        return nullptr;
+    }
+
+    rix::msg::mediator::SubInfo info;
+    info.id = generate_id();
+    info.topic_info = topic_info;
+
+    {
+        rix::msg::mediator::Endpoint ep_msg;
+        ep_msg.address = endpoint.address;
+        ep_msg.port    = endpoint.port;
+        info.endpoint  = ep_msg;
+    }
+
+    std::shared_ptr<rix::core::Subscriber> sub(new rix::core::Subscriber(info, server, client_factory_, rixhub_endpoint_));
+    if (!sub) {
+        return nullptr;
+    }
+
+    {
+        //std::lock_guard<std::mutex> guard(components_mutex_);
+        components_.push_back(std::static_pointer_cast<rix::core::interfaces::Spinner>(sub));
+    }
+
+    return sub;
 }
 
 Node::Node(const std::string &name, const rix::ipc::Endpoint &rixhub_endpoint, ServerFactory server_factory,
@@ -62,6 +120,10 @@ Node::Node(const std::string &name, const rix::ipc::Endpoint &rixhub_endpoint, S
     info_.name = name;
 
     /**< TODO: Deregister the node with the mediator */
+    if (client_factory_) {
+        auto client = client_factory_();
+        (void)rix::core::send_message_with_opcode_no_response(client, info_, OPCODE::NODE_DEREGISTER, rixhub_endpoint_);
+    }
 }
 
 }  // namespace core
