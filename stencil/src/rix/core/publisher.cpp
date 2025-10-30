@@ -14,21 +14,24 @@ Publisher::Publisher(const rix::msg::mediator::PubInfo &info, std::shared_ptr<ri
     }
 
     /**< TODO: Register the publisher with the mediator */
-    auto client = factory_();
-    if (!client) {
-        rix::util::Log::warn << "Publisher: failed to create client for registration." << std::endl;
-        return;
+    bool registered = true;
+    if (factory_) {
+        auto client = factory_();
+        registered = send_message_with_opcode(client, info_, OPCODE::PUB_REGISTER, rixhub_endpoint_);
     }
-    if (!send_message_with_opcode(client, info_, OPCODE::PUB_REGISTER, rixhub_endpoint_)) {
-        rix::util::Log::warn << "Publisher: PUB_REGISTER failed." << std::endl;
+    if (!registered) {
+        rix::util::Log::warn << "Failed to register publisher with rixhub." << std::endl;
+        shutdown_flag_.store(true);
+        shutdown();
+        return;
     }
 }
 
 Publisher::~Publisher() {
-    //shutdown();
+    shutdown();
     /**< TODO: Deregister the publisher with the mediator */
-    auto client = factory_();
-    if (client) {
+    if (factory_) {
+        auto client = factory_();
         (void)send_message_with_opcode_no_response(client, info_, OPCODE::PUB_DEREGISTER, rixhub_endpoint_);
     }
 }
@@ -39,7 +42,34 @@ void Publisher::shutdown() { shutdown_flag_ = true; }
 
 /**< TODO: Implement the publish method */
 void Publisher::publish(const rix::msg::Message &msg) {
-    return;
+    if (shutdown_flag_.load()) {
+        return;
+    }
+    
+    rix::msg::standard::UInt32 size_prefix;
+    size_prefix.data = static_cast<uint32_t>(msg.size());
+    std::vector<uint8_t> buffer(size_prefix.size() + msg.size());
+    size_t offset = 0;
+    size_prefix.serialize(buffer.data(), offset);
+    msg.serialize(buffer.data(), offset);
+
+    std::lock_guard<std::mutex> guard(connections_mutex_);
+    for (auto it = connections_.begin(); it != connections_.end();) {
+        auto conn = it->lock();
+        if (!conn) {
+            it = connections_.erase(it);
+            continue;
+        }
+
+        ssize_t bytes = conn->write(buffer.data(), buffer.size());
+        if (bytes != static_cast<ssize_t>(buffer.size())) {
+            rix::util::Log::warn << "Publisher failed to write full message; dropping connection." << std::endl;
+            it = connections_.erase(it);
+            continue;
+        }
+
+        ++it;
+    }
 }
 
 size_t Publisher::get_subscriber_count() const {
